@@ -8,7 +8,9 @@ local HealComm = LibStub:NewLibrary(major, minor)
 if( not HealComm ) then return end
 
 local COMM_PREFIX = "LHC40"
+local OLD_COMM_PREFIX = "HealComm"
 C_ChatInfo.RegisterAddonMessagePrefix(COMM_PREFIX)
+C_ChatInfo.RegisterAddonMessagePrefix(OLD_COMM_PREFIX)
 
 local bit = bit
 local ceil = ceil
@@ -90,10 +92,17 @@ local spellRankTableData = {
 	[13] = { 26982, 26979 },
 }
 
+local spellNameToMaxSpellId = {}
+
 local SpellIDToRank = {}
-for rankIndex, spellIDTable in pairs(spellRankTableData) do
+for rankIndex, spellIDTable in ipairs(spellRankTableData) do
 	for _, spellID in pairs(spellIDTable) do
 		SpellIDToRank[spellID] = rankIndex
+
+		local spellName = GetSpellInfo(spellID)
+		if spellName then
+			spellNameToMaxSpellId[spellName] = spellID
+		end
 	end
 end
 
@@ -127,6 +136,8 @@ HealComm.pendingHots = HealComm.pendingHots or {}
 HealComm.spellData = HealComm.spellData or {}
 HealComm.talentData = HealComm.talentData or {}
 HealComm.tempPlayerList = HealComm.tempPlayerList or {}
+
+HealComm.lastSpellCast = HealComm.lastSpellCast or {}
 
 if( not HealComm.unitToPet ) then
 	HealComm.unitToPet = {["player"] = "pet"}
@@ -1592,10 +1603,11 @@ local healingModifiers, currentModifiers = HealComm.healingModifiers, HealComm.c
 
 local distribution
 local CTL = _G.ChatThrottleLib
-local function sendMessage(msg)
+local function sendMessage(msg, prefix)
 	if( distribution and strlen(msg) <= 240 ) then
 		if CTL then
-			CTL:SendAddonMessage("BULK", COMM_PREFIX, msg, distribution or 'GUILD')
+			prefix = prefix or COMM_PREFIX
+			CTL:SendAddonMessage("BULK", prefix, msg, distribution or 'GUILD')
 		end
 	end
 end
@@ -1813,6 +1825,7 @@ local function loadHealList(pending, amount, stack, endTime, ticksLeft, ...)
 end
 
 local function parseDirectHeal(casterGUID, spellID, amount, castTime, ...)
+	-- print("we are parsing a direct heal " .. casterGUID .. " " .. spellID .. " " .. amount .. " " .. castTime .. " targets: " .. ...)
 	local spellName = GetSpellInfo(spellID)
 	local unit = guidToUnit[casterGUID]
 
@@ -1837,6 +1850,8 @@ local function parseDirectHeal(casterGUID, spellID, amount, castTime, ...)
 	pending.bitType = DIRECT_HEALS
 
 	loadHealList(pending, amount, 1, pending.endTime, nil, ...)
+
+	-- DevTools_Dump(tempPlayerList)
 
 	HealComm.callbacks:Fire("HealComm_HealStarted", casterGUID, spellID, pending.bitType, pending.endTime, unpack(tempPlayerList))
 end
@@ -2059,11 +2074,135 @@ local function parseHealDelayed(casterGUID, startTimeRelative, endTimeRelative, 
 	HealComm.callbacks:Fire("HealComm_HealDelayed", casterGUID, pending.spellID, pending.bitType, pending.endTime, unpack(tempPlayerList))
 end
 
+local ClassicUsers = {}
+
+local function oldClientStopHeal(casterGUID, spellID)
+	parseHealEnd(casterGUID, nil, "name", spellID, false)
+end
+
+local function oldClientHeal(casterGUID, spellID, amount, castTime, targetNames)
+	local targetGUIDS = {}
+	local tempGUID
+	for i, targetName in ipairs(targetNames) do
+		tempGUID = UnitGUID(Ambiguate(targetName, "none"))
+		if not tempGUID then return end
+		targetGUIDS[i] = compressGUID[tempGUID]
+	end
+	parseDirectHeal(casterGUID, spellID, tonumber(amount), tonumber(castTime) / 1000, unpack(targetGUIDS))
+end
+
+function HealComm:OLD_CHAT_MSG_ADDON(prefix, message, channel, sender)
+	local casterGUID = UnitGUID(Ambiguate(sender, "none"))
+	if (not casterGUID) then return end
+
+	local function tempprint(msg)
+		-- print(msg)
+	end
+
+	-- local caster = arg4
+
+	if sender ~= UnitName("player") then
+		local result = {strsplit("/", message)}
+		local spellID = self.lastSpellCast[casterGUID]
+
+		-- print("result1 " .. result[1])
+
+		if result[1] == "Heal" then
+			if (not spellID) then return end
+			local target = result[2]
+			local amount = result[3]
+			local castTime = result[4]
+			if (not target or not amount or not castTime ) then return end
+			oldClientHeal(casterGUID, spellID, amount, castTime, {target})
+		elseif result[1] == "Healstop" or result[1] == "GrpHealstop" then
+			if (not spellID) then return end
+			oldClientStopHeal(casterGUID, spellID)
+		elseif result[1] == "Healdelay" then
+			-- self:delayHeal(arg4, result[2])
+		elseif result[1] == "Resurrection" and result[2] == "stop" then
+			tempprint("not implemented yet")
+			return
+			-- self:cancelResurrection(arg4)
+		elseif result[1] == "Resurrection" and result[3] == "start" then
+			tempprint("not implemented yet")
+			return
+			-- self:startResurrection(arg4, result[2])
+		elseif result[1] == "GrpHeal" then
+			if (not spellID) then return end
+			local amount = result[2]
+			local castTime = result[3]
+			local targets = {}
+			local i = 4
+			while (result[i] ~= nil and result[i] ~= "") do
+				targets[i-3] = result[i]
+				i = i + 1
+			end
+			oldClientHeal(casterGUID, spellID, amount, castTime, targets)
+		elseif result[1] == "GrpHealdelay" then
+			tempprint("not implemented yet")
+			return
+			-- self:delayGrpHeal(arg4, result[2])
+		elseif result[1] == "Renew" then
+			tempprint("not implemented yet")
+			return
+			-- if not self.Hots[result[2]] then
+			-- 	self.Hots[result[2]] = {}
+			-- end
+			-- if not self.Hots[result[2]]["Renew"] then
+			-- 	self.Hots[result[2]]["Renew"]= {}
+			-- end
+			-- self.Hots[result[2]]["Renew"].dur = result[3]
+			-- self.Hots[result[2]]["Renew"].start = GetTime()
+			-- local targetUnit = roster:GetUnitIDFromName(result[2])
+			-- self:TriggerEvent("HealComm_Hotupdate", targetUnit, "Renew")
+		elseif result[1] == "Reju" then
+			tempprint("not implemented yet")
+			return
+			-- if not self.Hots[result[2]] then
+			-- 	self.Hots[result[2]] = {}
+			-- end
+			-- if not self.Hots[result[2]]["Reju"] then
+			-- 	self.Hots[result[2]]["Reju"]= {}
+			-- end
+			-- self.Hots[result[2]]["Reju"].dur = result[3]
+			-- self.Hots[result[2]]["Reju"].start = GetTime()
+			-- local targetUnit = roster:GetUnitIDFromName(result[2])
+			-- self:TriggerEvent("HealComm_Hotupdate", targetUnit, "Rejuvenation")
+		elseif result[1] == "Regr" then
+			tempprint("not implemented yet")
+			return
+			-- if not self.Hots[result[2]] then
+			-- 	self.Hots[result[2]] = {}
+			-- end
+			-- if not self.Hots[result[2]]["Regr"] then
+			-- 	self.Hots[result[2]]["Regr"]= {}
+			-- end
+			-- self.Hots[result[2]]["Regr"].dur = result[3]
+			-- self.Hots[result[2]]["Regr"].start = GetTime()
+			-- local targetUnit = roster:GetUnitIDFromName(result[2])
+			-- self:TriggerEvent("HealComm_Hotupdate", targetUnit, "Regrowth")
+		end
+	end
+end
+
 -- After checking around 150-200 messages in battlegrounds, server seems to always be passed (if they are from another server)
 -- Channels use tick total because the tick interval varies by haste
 -- Hots use tick interval because the total duration varies but the tick interval stays the same
 function HealComm:CHAT_MSG_ADDON(prefix, message, channel, sender)
-	if( prefix ~= COMM_PREFIX or channel ~= distribution ) then return end
+	if channel ~= distribution then return end
+
+	if(prefix == OLD_COMM_PREFIX) then
+		if ClassicUsers[sender] then return end
+		-- print("CHAT_MSG_ADDON: " .. prefix .. " " .. message .. " " .. channel .. " " .. sender)
+		self:OLD_CHAT_MSG_ADDON(prefix, message, channel, sender)
+		return
+	end
+	if(prefix ~= COMM_PREFIX) then return end
+
+	-- print("CHAT_MSG_ADDON: " .. prefix .. " " .. message .. " " .. channel .. " " .. sender)
+
+
+	ClassicUsers[sender] = true
 
 	local commType, extraArg, spellID, arg1, arg2, arg3, arg4, arg5, arg6 = strsplit(":", message)
 	local casterGUID = UnitGUID(Ambiguate(sender, "none"))
@@ -2073,6 +2212,7 @@ function HealComm:CHAT_MSG_ADDON(prefix, message, channel, sender)
 
 	-- New direct heal - D:<extra>:<spellID>:<amount>:target1,target2...
 	if( commType == "D" and arg1 and arg2 ) then
+		print("parse direct heal target " .. arg2)
 		parseDirectHeal(casterGUID, spellID, tonumber(arg1), tonumber(extraArg), strsplit(",", arg2))
 		-- New channel heal - C:<extra>:<spellID>:<amount>:<totalTicks>:target1,target2...
 	elseif( commType == "C" and arg1 and arg3 ) then
@@ -2167,19 +2307,39 @@ local eventRegistered = {
 	SPELL_AURA_REFRESH = true,
 	SPELL_AURA_APPLIED_DOSE = true,
 	SPELL_AURA_REMOVED_DOSE = true,
+	SPELL_CAST_START = true,
+	SPELL_CAST_SUCCESS = true,
 }
 
 function HealComm:COMBAT_LOG_EVENT_UNFILTERED(...)
 	local timestamp, eventType, hideCaster, sourceGUID, sourceName, sourceFlags, sourceRaidFlags, destGUID, destName, destFlags, destRaidFlags = ...
+
 	if( not eventRegistered[eventType] ) then return end
+
+	-- print("COMBAT_LOG_EVENT_UNFILTERED: " .. timestamp .. " " .. eventType)
+
 
 	local _, spellName = select(12, ...)
 	local destUnit = guidToUnit[destGUID]
 	local spellID = destUnit and select(10, unitHasAura(destUnit, spellName)) or select(7, GetSpellInfo(spellName))
+	
 
 	-- Heal or hot ticked that the library is tracking
 	-- It's more efficient/accurate to have the library keep track of this locally, spamming the comm channel would not be a very good thing especially when a single player can have 4 - 8 hots/channels going on them.
-	if( eventType == "SPELL_HEAL" or eventType == "SPELL_PERIODIC_HEAL" ) then
+	if( eventType == "SPELL_CAST_START" ) then
+		if sourceName ~= nil and spellName ~= nil then
+			-- print("setting last spell cast " .. sourceName .. " to " .. spellName)
+			local spellID = spellNameToMaxSpellId[spellName]
+			self.lastSpellCast[sourceGUID] = spellID
+		end
+	elseif( eventType == "SPELL_CAST_SUCCESS" ) then
+		if sourceName ~= nil and spellName ~= nil and not ClassicUsers[sourceName] then
+			local spellID = spellNameToMaxSpellId[spellName]
+			if spellID then
+				oldClientStopHeal(sourceGUID, spellID)
+			end
+		end
+	elseif( eventType == "SPELL_HEAL" or eventType == "SPELL_PERIODIC_HEAL" ) then
 		local pending = sourceGUID and pendingHots[sourceGUID] and pendingHots[sourceGUID][spellName]
 		if( pending and pending[destGUID] and pending.bitType and bit.band(pending.bitType, OVERTIME_HEALS) > 0 ) then
 			local amount, stack, _, ticksLeft = getRecord(pending, destGUID)
@@ -2368,8 +2528,35 @@ function HealComm:UNIT_SPELLCAST_START(unit, cast, spellID)
 
 	if( bitType == DIRECT_HEALS ) then
 		local startTime, endTime = select(4, CastingInfo())
-		parseDirectHeal(playerGUID, spellID, amt, (endTime - startTime) / 1000, strsplit(",", targets))
-		sendMessage(format("D:%.3f:%d:%d:%s", (endTime - startTime) / 1000, spellID or 0, amt or "", targets))
+		local duration = endTime - startTime
+
+		parseDirectHeal(playerGUID, spellID, amt, duration / 1000, strsplit(",", targets))
+		sendMessage(format("D:%.3f:%d:%d:%s", duration / 1000, spellID or 0, amt or "", targets))
+
+		-- TODO - clean this up
+		local numTargets = 0
+		local names = ""
+		local tempUnit
+		local tempUnitName
+		for i=1, select("#", strsplit(",", targets)) do
+			local guid = select(i, strsplit(",", targets))
+			local decompGUID = guid and decompressGUID[guid]
+			if( decompGUID ) then
+				tempUnit = guidToUnit[decompGUID]
+				if tempUnit then
+					tempUnitName = UnitName(tempUnit)
+					if tempUnitName then
+						names = names .. tempUnitName .. "/"
+						numTargets = numTargets + 1
+					end
+				end
+			end
+		end
+		if numTargets > 1 then
+			sendMessage(format("GrpHeal/%d/%d/%s", amt, duration, names), OLD_COMM_PREFIX)
+		elseif numTargets == 1 then
+			sendMessage(format("Heal/%s%d/%d/", names, amt, duration), OLD_COMM_PREFIX)
+		end
 	elseif( bitType == CHANNEL_HEALS ) then
 		spellData[spellName]._isChanneled = true
 	end
@@ -2414,6 +2601,11 @@ function HealComm:UNIT_SPELLCAST_STOP(unit, castGUID, spellID)
 	if not spellCastSucceeded[spellID] then
 		parseHealEnd(playerGUID, nil, "name", spellID, true)
 		sendMessage(format("S::%d:1", spellID or 0))
+		if self.lastSpellCast[UnitGUID(unit)] == 25316 then -- max rank PoH
+			sendMessage("GrpHealstop", OLD_COMM_PREFIX)
+		else
+			sendMessage("Healstop", OLD_COMM_PREFIX)
+		end
 	end
 
 	spellCastSucceeded[spellID] = nil
@@ -2443,6 +2635,7 @@ function HealComm:UNIT_SPELLCAST_DELAYED(unit, castGUID, spellID)
 			local endTimeRelative = endTime / 1000 - GetTime()
 			parseHealDelayed(casterGUID, startTimeRelative, endTimeRelative, spellID)
 			sendMessage(format("F::%d:%.3f:%.3f", spellID, startTimeRelative, endTimeRelative))
+			sendMessage(format("Healdelay/1000/")) -- TODO, improve this (extract delay from pendingHeals)
 		end
 		-- Channel heal delayed
 	elseif( pendingHeals[casterGUID][spellName].bitType == CHANNEL_HEALS ) then
