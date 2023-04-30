@@ -1,0 +1,10 @@
+## Interface: 20503
+## Title: Lib: HermesHealComm-1.0
+## Notes: Library for showing incoming heals and hots
+## Author: Shadowed, xbeeps, Azilroka
+## X-Category: Library
+
+libs\LibStub\LibStub.lua
+libs\CallbackHandler-1.0\CallbackHandler-1.0.lua
+
+LibHermesHealComm-1.0.xml
